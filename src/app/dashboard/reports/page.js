@@ -1,0 +1,1494 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import { useAppDispatch } from '@/hooks/useAppDispatch';
+import { useAppSelector } from '@/hooks/useAppSelector';
+import { fetchReports, fetchReportById, createReport, updateReport, submitReport, approveReport, rejectReport } from '@/store/slices/reportsSlice';
+import { fetchCases, fetchCaseById } from '@/store/slices/casesSlice';
+import {
+  MagnifyingGlassIcon,
+  FunnelIcon,
+  ChartBarIcon,
+  DocumentArrowDownIcon,
+  CalendarIcon,
+  ClockIcon,
+  UserIcon,
+  EyeIcon,
+  CheckCircleIcon,
+  XCircleIcon,
+  PaperAirplaneIcon,
+  PlusIcon,
+  PencilIcon,
+  PhotoIcon,
+  StarIcon,
+  LinkIcon,
+} from '@heroicons/react/24/outline';
+import toast from 'react-hot-toast';
+
+const reportTypeLabels = {
+  cases: 'تقرير الحالات',
+  sessions: 'تقرير الجلسات',
+  appointments: 'تقرير المواعيد',
+  evaluations: 'تقرير التقييمات',
+  summary: 'تقرير شامل',
+  custom: 'تقرير مخصص',
+};
+
+const statusLabels = {
+  draft: 'مسودة',
+  submitted: 'مقدمة',
+  approved: 'موافق عليها',
+  rejected: 'مرفوضة',
+  locked: 'مقفلة',
+};
+
+const statusColors = {
+  draft: 'bg-primary-muted text-on-tint',
+  submitted: 'bg-warning-100 text-warning-800',
+  approved: 'bg-success-100 text-success-800',
+  rejected: 'bg-danger-100 text-danger-800',
+  locked: 'bg-primary text-light',
+};
+
+export default function ReportsPage() {
+  const dispatch = useAppDispatch();
+  const { reports = [], loading, currentReport } = useAppSelector((state) => state.reports);
+  const { cases = [] } = useAppSelector((state) => state.cases);
+
+  const [searchTerm, setSearchTerm] = useState('');
+  const [casesData, setCasesData] = useState({}); // لتخزين بيانات الحالات
+  const [showFilters, setShowFilters] = useState(false);
+  const [showDetailsModal, setShowDetailsModal] = useState(false);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [showApproveModal, setShowApproveModal] = useState(false);
+  const [showRejectModal, setShowRejectModal] = useState(false);
+  const [selectedReportId, setSelectedReportId] = useState(null);
+  const [selectedReport, setSelectedReport] = useState(null);
+  const [createFormData, setCreateFormData] = useState({
+    report_type: 'clinical_case',
+    target_type: 'case',
+    target_id: '',
+    title: '',
+    description: '',
+    diagnosis: '',
+    summary: '',
+    treatment_plan: '',
+    notes: '',
+  });
+  const [editFormData, setEditFormData] = useState({
+    title: '',
+    description: '',
+    diagnosis: '',
+    summary: '',
+    treatment_plan: '',
+    notes: '',
+  });
+  const [approveFormData, setApproveFormData] = useState({
+    review_notes: '',
+    score: '',
+  });
+  const [rejectFormData, setRejectFormData] = useState({
+    review_notes: '',
+  });
+  const [localFilters, setLocalFilters] = useState({
+    report_type: '',
+    status: '',
+    date_from: '',
+    date_to: '',
+  });
+
+  useEffect(() => {
+    dispatch(fetchReports());
+    dispatch(fetchCases());
+  }, [dispatch]);
+
+  // جلب بيانات الحالات لكل تقرير
+  useEffect(() => {
+    const fetchCasesForReports = async () => {
+      if (!Array.isArray(reports) || reports.length === 0) {
+        return;
+      }
+
+      // جمع جميع case IDs الفريدة من التقارير
+      const caseIds = new Set();
+      reports.forEach((report) => {
+        if (report.target_type === 'case' && report.target_id) {
+          caseIds.add(report.target_id);
+        }
+      });
+
+      // جلب بيانات الحالات التي لم يتم جلبها بعد
+      const fetchedCases = {};
+      await Promise.all(
+        Array.from(caseIds).map(async (caseId) => {
+          // التحقق من أن الحالة لم يتم جلبها بالفعل
+          if (casesData[caseId]) {
+            return;
+          }
+          try {
+            const result = await dispatch(fetchCaseById(caseId));
+            if (fetchCaseById.fulfilled.match(result)) {
+              fetchedCases[caseId] = result.payload;
+            }
+          } catch (error) {
+            console.error(`Error fetching case ${caseId}:`, error);
+          }
+        })
+      );
+
+      // تحديث casesData
+      if (Object.keys(fetchedCases).length > 0) {
+        setCasesData((prev) => ({ ...prev, ...fetchedCases }));
+      }
+    };
+
+    fetchCasesForReports();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reports, dispatch]);
+
+  useEffect(() => {
+    if (selectedReportId) {
+      dispatch(fetchReportById(selectedReportId));
+    }
+  }, [selectedReportId, dispatch]);
+
+  const filteredReports = Array.isArray(reports) ? reports.filter((report) => {
+    const matchesSearch =
+      report.title?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      report.description?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      report.report_type?.toLowerCase().includes(searchTerm.toLowerCase());
+
+    const matchesType =
+      !localFilters.report_type || report.report_type === localFilters.report_type;
+    const matchesStatus = !localFilters.status || report.status === localFilters.status;
+
+    const reportDate = new Date(report.created_at);
+    const matchesDateFrom =
+      !localFilters.date_from || reportDate >= new Date(localFilters.date_from);
+    const matchesDateTo =
+      !localFilters.date_to || reportDate <= new Date(localFilters.date_to);
+
+    return matchesSearch && matchesType && matchesStatus && matchesDateFrom && matchesDateTo;
+  }) : [];
+
+  const handleCreateReport = async () => {
+    if (!createFormData.title || !createFormData.target_id) {
+      toast.error('يرجى ملء جميع الحقول المطلوبة');
+      return;
+    }
+
+    try {
+      // بناء object المحتوى من الحقول المنفصلة
+      const contentObj = {};
+      if (createFormData.diagnosis?.trim()) {
+        contentObj.diagnosis = createFormData.diagnosis.trim();
+      }
+      if (createFormData.summary?.trim()) {
+        contentObj.summary = createFormData.summary.trim();
+      }
+      if (createFormData.treatment_plan?.trim()) {
+        contentObj.treatment_plan = createFormData.treatment_plan.trim();
+      }
+      if (createFormData.notes?.trim()) {
+        contentObj.notes = createFormData.notes.trim();
+      }
+      // إذا كان هناك محتوى من حقول أخرى، يمكن إضافته هنا
+      // للأنواع الأخرى من التقارير
+      if (createFormData.report_type !== 'clinical_case' && createFormData.summary?.trim()) {
+        contentObj.summary = createFormData.summary.trim();
+      }
+
+      const result = await dispatch(createReport({
+        report_type: createFormData.report_type,
+        target_type: createFormData.target_type,
+        target_id: createFormData.target_id,
+        title: createFormData.title,
+        description: createFormData.description || '',
+        content: Object.keys(contentObj).length > 0 ? contentObj : {},
+      }));
+
+      if (createReport.fulfilled.match(result)) {
+        toast.success('تم إنشاء التقرير بنجاح');
+        setShowCreateModal(false);
+        setCreateFormData({
+          report_type: 'clinical_case',
+          target_type: 'case',
+          target_id: '',
+          title: '',
+          description: '',
+          diagnosis: '',
+          summary: '',
+          treatment_plan: '',
+          notes: '',
+        });
+        dispatch(fetchReports());
+      } else {
+        const errorMessage = result.payload?.message || 
+                           result.payload?.error || 
+                           'فشل إنشاء التقرير';
+        toast.error(errorMessage);
+      }
+    } catch (error) {
+      toast.error('حدث خطأ أثناء إنشاء التقرير');
+    }
+  };
+
+  const handleEditReport = (report) => {
+    // التحقق من أن التقرير في حالة draft أو rejected
+    if (report.status !== 'draft' && report.status !== 'rejected') {
+      toast.error('يمكن تعديل التقارير في حالة draft أو rejected فقط');
+      return;
+    }
+    
+    setSelectedReport(report);
+    setSelectedReportId(report.id);
+    
+    // استخراج الحقول من content object
+    const content = report.content || {};
+    setEditFormData({
+      title: report.title || '',
+      description: report.description || '',
+      diagnosis: content.diagnosis || '',
+      summary: content.summary || '',
+      treatment_plan: content.treatment_plan || '',
+      notes: content.notes || '',
+    });
+    setShowEditModal(true);
+  };
+
+  const handleUpdateReport = async () => {
+    if (!selectedReportId || !selectedReport) return;
+
+    if (!editFormData.title) {
+      toast.error('العنوان مطلوب');
+      return;
+    }
+
+    try {
+      // بناء object المحتوى من الحقول المنفصلة
+      const contentObj = {};
+      if (editFormData.diagnosis?.trim()) {
+        contentObj.diagnosis = editFormData.diagnosis.trim();
+      }
+      if (editFormData.summary?.trim()) {
+        contentObj.summary = editFormData.summary.trim();
+      }
+      if (editFormData.treatment_plan?.trim()) {
+        contentObj.treatment_plan = editFormData.treatment_plan.trim();
+      }
+      if (editFormData.notes?.trim()) {
+        contentObj.notes = editFormData.notes.trim();
+      }
+
+      const result = await dispatch(updateReport({
+        reportId: selectedReportId,
+        title: editFormData.title,
+        description: editFormData.description || '',
+        content: Object.keys(contentObj).length > 0 ? contentObj : {},
+      }));
+
+      if (updateReport.fulfilled.match(result)) {
+        toast.success('تم تحديث التقرير بنجاح');
+        setShowEditModal(false);
+        setSelectedReport(null);
+        setSelectedReportId(null);
+        setEditFormData({
+          title: '',
+          description: '',
+          diagnosis: '',
+          summary: '',
+          treatment_plan: '',
+          notes: '',
+        });
+        dispatch(fetchReports());
+        if (showDetailsModal) {
+          dispatch(fetchReportById(selectedReportId));
+        }
+      } else {
+        const errorMessage = result.payload?.message || 
+                           result.payload?.error || 
+                           'فشل تحديث التقرير';
+        toast.error(errorMessage);
+      }
+    } catch (error) {
+      toast.error('حدث خطأ أثناء تحديث التقرير');
+    }
+  };
+
+  const handleViewDetails = async (reportId) => {
+    setSelectedReportId(reportId);
+    setShowDetailsModal(true);
+  };
+
+  const handleApproveReport = async () => {
+    if (!selectedReportId) return;
+
+    try {
+      const result = await dispatch(approveReport({
+        reportId: selectedReportId,
+        review_notes: approveFormData.review_notes,
+        score: approveFormData.score,
+      }));
+      
+      if (approveReport.fulfilled.match(result)) {
+        toast.success('تم اعتماد التقرير بنجاح');
+        setShowApproveModal(false);
+        setSelectedReportId(null);
+        setApproveFormData({ review_notes: '', score: '' });
+        dispatch(fetchReports());
+        if (showDetailsModal) {
+          dispatch(fetchReportById(selectedReportId));
+        }
+      } else {
+        const errorMessage = result.payload?.message || 
+                           result.payload?.error || 
+                           'فشل اعتماد التقرير';
+        toast.error(errorMessage);
+      }
+    } catch (error) {
+      toast.error('حدث خطأ أثناء اعتماد التقرير');
+    }
+  };
+
+  const handleSubmitReport = async (reportId) => {
+    if (!confirm('هل أنت متأكد من تقديم هذا التقرير؟ بعد التقديم سيتم إرساله للمراجعة.')) {
+      return;
+    }
+
+    try {
+      const result = await dispatch(submitReport(reportId));
+      
+      if (submitReport.fulfilled.match(result)) {
+        toast.success('تم تقديم التقرير بنجاح');
+        dispatch(fetchReports());
+        if (showDetailsModal && selectedReportId === reportId) {
+          dispatch(fetchReportById(reportId));
+        }
+      } else {
+        const errorMessage = result.payload?.message || 
+                           result.payload?.error || 
+                           'فشل تقديم التقرير';
+        toast.error(errorMessage);
+      }
+    } catch (error) {
+      toast.error('حدث خطأ أثناء تقديم التقرير');
+    }
+  };
+
+  const handleRejectReport = async () => {
+    if (!selectedReportId) return;
+
+    if (!rejectFormData.review_notes || !rejectFormData.review_notes.trim()) {
+      toast.error('يرجى إدخال ملاحظات الرفض');
+      return;
+    }
+
+    try {
+      const result = await dispatch(rejectReport({
+        reportId: selectedReportId,
+        review_notes: rejectFormData.review_notes,
+      }));
+      
+      if (rejectReport.fulfilled.match(result)) {
+        toast.success('تم رفض التقرير بنجاح');
+        setShowRejectModal(false);
+        setSelectedReportId(null);
+        setRejectFormData({ review_notes: '' });
+        dispatch(fetchReports());
+        if (showDetailsModal) {
+          dispatch(fetchReportById(selectedReportId));
+        }
+      } else {
+        const errorMessage = result.payload?.message || 
+                           result.payload?.error || 
+                           'فشل رفض التقرير';
+        toast.error(errorMessage);
+      }
+    } catch (error) {
+      toast.error('حدث خطأ أثناء رفض التقرير');
+    }
+  };
+
+
+  return (
+    <div className="space-y-6">
+      {/* Page Header */}
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-bold text-text mb-2" style={{ fontFamily: 'inherit' }}>
+            التقارير
+          </h1>
+          <p className="text-sm sm:text-base text-text-secondary leading-relaxed" style={{ fontFamily: 'inherit' }}>
+            عرض ومراجعة تقارير الحالات المشرف عليها
+          </p>
+        </div>
+        <button
+          onClick={() => {
+            setCreateFormData({
+              report_type: 'clinical_case',
+              target_type: 'case',
+              target_id: '',
+              title: '',
+              description: '',
+              content: '',
+            });
+            setShowCreateModal(true);
+          }}
+          className="flex items-center gap-2.5 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-light hover:bg-primary-hover transition-colors focus:outline-none focus:ring-2 focus:ring-primary/30"
+        >
+          <PlusIcon className="h-5 w-5" />
+          تقرير جديد
+        </button>
+      </div>
+
+      {/* Search and Filters */}
+      <div className="rounded-lg bg-surface border border-border p-5 shadow-sm">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          {/* Search */}
+          <div className="relative flex-1 max-w-md">
+            <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3">
+              <MagnifyingGlassIcon className="h-5 w-5 text-text-secondary" />
+            </div>
+            <input
+              type="text"
+              placeholder="ابحث عن تقرير..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="block w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 pr-10 text-sm text-text placeholder-text-secondary/60 focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200"
+            />
+          </div>
+
+          {/* Filter Toggle */}
+          <button
+            onClick={() => setShowFilters(!showFilters)}
+            className="flex items-center gap-2 rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm font-semibold text-text hover:bg-tint-hover hover:border-border-hover transition-colors focus:outline-none focus:ring-2 focus:ring-ring/20"
+          >
+            <FunnelIcon className="h-5 w-5" />
+            فلترة
+          </button>
+        </div>
+
+        {/* Filters Panel */}
+        {showFilters && (
+          <div className="mt-5 pt-5 grid grid-cols-1 gap-4 border-t border-border md:grid-cols-4">
+            <div>
+              <label className="block text-sm font-semibold text-text mb-2.5">نوع التقرير</label>
+              <select
+                value={localFilters.report_type}
+                onChange={(e) =>
+                  setLocalFilters({ ...localFilters, report_type: e.target.value })
+                }
+                className="w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm text-text focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200"
+              >
+                <option value="">جميع الأنواع</option>
+                {Object.entries(reportTypeLabels).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-semibold text-text mb-2.5">الحالة</label>
+              <select
+                value={localFilters.status}
+                onChange={(e) =>
+                  setLocalFilters({ ...localFilters, status: e.target.value })
+                }
+                className="w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm text-text focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200"
+              >
+                <option value="">جميع الحالات</option>
+                {Object.entries(statusLabels).map(([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-semibold text-text mb-2.5">من تاريخ</label>
+              <input
+                type="date"
+                value={localFilters.date_from}
+                onChange={(e) =>
+                  setLocalFilters({ ...localFilters, date_from: e.target.value })
+                }
+                className="w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm text-text focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-semibold text-text mb-2.5">إلى تاريخ</label>
+              <input
+                type="date"
+                value={localFilters.date_to}
+                onChange={(e) =>
+                  setLocalFilters({ ...localFilters, date_to: e.target.value })
+                }
+                className="w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm text-text focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200"
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Reports List */}
+      <div className="rounded-lg bg-surface border border-border overflow-hidden shadow-sm">
+        {loading ? (
+          <div className="p-12 text-center">
+            <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-primary border-r-transparent"></div>
+            <p className="mt-4 text-base font-semibold text-text-secondary leading-relaxed">جاري تحميل التقارير...</p>
+          </div>
+        ) : filteredReports.length === 0 ? (
+          <div className="p-12 text-center">
+            <ChartBarIcon className="mx-auto h-12 w-12 text-text-secondary" />
+            <p className="mt-4 text-base font-semibold text-text leading-relaxed">لا توجد تقارير</p>
+            <p className="mt-2 text-sm text-text-secondary leading-relaxed">
+              {searchTerm || localFilters.report_type || localFilters.status
+                ? 'لا توجد تقارير تطابق معايير البحث'
+                : 'لم يتم إنشاء أي تقارير بعد'}
+            </p>
+          </div>
+        ) : (
+          <div className="divide-y divide-border">
+            {filteredReports.map((report) => (
+              <div key={report.id} className="p-5 sm:p-6 hover:bg-primary-muted transition-colors">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-3 mb-3 flex-wrap">
+                      <h3 className="text-lg font-semibold text-text leading-relaxed">
+                        {report.title || 'تقرير بدون عنوان'}
+                      </h3>
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-medium whitespace-nowrap ${
+                          statusColors[report.status] || statusColors.draft
+                        }`}
+                      >
+                        {statusLabels[report.status] || report.status}
+                      </span>
+                      <span className="rounded-full bg-tint px-3 py-1 text-xs font-medium text-on-tint whitespace-nowrap">
+                        {reportTypeLabels[report.report_type] || report.report_type}
+                      </span>
+                    </div>
+
+                    {report.description && (
+                      <p className="text-sm text-text-secondary mb-4 line-clamp-2 leading-relaxed">
+                        {report.description}
+                      </p>
+                    )}
+
+                    {/* Student and Case Info */}
+                    <div className="mb-4 flex flex-wrap gap-4 text-sm">
+                      {report.student_name && (
+                        <div className="flex items-center gap-2">
+                          <UserIcon className="h-4 w-4 text-primary flex-shrink-0" />
+                          <span className="text-text-secondary">الطالب:</span>
+                          <span className="font-semibold text-text">{report.student_name}</span>
+                        </div>
+                      )}
+                      {report.target_type === 'case' && report.target_id && (
+                        <div className="flex items-center gap-2">
+                          <ChartBarIcon className="h-4 w-4 text-primary flex-shrink-0" />
+                          <span className="text-text-secondary">الحالة:</span>
+                          <span className="font-semibold text-text">
+                            {casesData[report.target_id]?.title || 'جاري التحميل...'}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-4 text-xs text-text-secondary flex-wrap">
+                      {report.created_at && (
+                        <div className="flex items-center gap-2">
+                          <CalendarIcon className="h-4 w-4 text-primary flex-shrink-0" />
+                          <span>
+                            {new Date(report.created_at).toLocaleDateString('ar-SA', {
+                              year: 'numeric',
+                              month: 'short',
+                              day: 'numeric',
+                            })}
+                          </span>
+                        </div>
+                      )}
+                      {report.created_by && (
+                        <div className="flex items-center gap-2">
+                          <UserIcon className="h-4 w-4 text-primary flex-shrink-0" />
+                          <span>
+                            {report.created_by?.first_name} {report.created_by?.last_name}
+                          </span>
+                        </div>
+                      )}
+                      {report.file_url && (
+                        <div className="flex items-center gap-2 text-link">
+                          <DocumentArrowDownIcon className="h-4 w-4 flex-shrink-0" />
+                          <span className="font-semibold">ملف متاح للتحميل</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex gap-2 flex-shrink-0 flex-wrap">
+                    <button
+                      onClick={() => handleViewDetails(report.id)}
+                      className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-light hover:bg-primary-hover transition-colors focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    >
+                      <EyeIcon className="h-4 w-4" />
+                      عرض التفاصيل
+                    </button>
+                    {(report.status === 'draft' || report.status === 'rejected') && (
+                      <>
+                        <button
+                          onClick={() => handleEditReport(report)}
+                          className="flex items-center gap-2 rounded-lg bg-orange-500 px-4 py-2 text-sm font-semibold text-light hover:bg-orange-600 transition-colors focus:outline-none focus:ring-2 focus:ring-orange-500/30"
+                        >
+                          <PencilIcon className="h-4 w-4" />
+                          تعديل
+                        </button>
+                        <button
+                          onClick={() => handleSubmitReport(report.id)}
+                          className="flex items-center gap-2 rounded-lg bg-info-500 px-4 py-2 text-sm font-semibold text-light hover:bg-info-600 transition-colors focus:outline-none focus:ring-2 focus:ring-info-500/30"
+                        >
+                          <PaperAirplaneIcon className="h-4 w-4" />
+                          تقديم
+                        </button>
+                      </>
+                    )}
+                    {report.status === 'submitted' && (
+                      <>
+                        <button
+                          onClick={() => {
+                            setSelectedReportId(report.id);
+                            setApproveFormData({ review_notes: '', score: '' });
+                            setShowApproveModal(true);
+                          }}
+                          className="flex items-center gap-2 rounded-lg bg-success-500 px-4 py-2 text-sm font-semibold text-light hover:bg-success-600 transition-colors focus:outline-none focus:ring-2 focus:ring-success-500/30"
+                        >
+                          <CheckCircleIcon className="h-4 w-4" />
+                          موافقة
+                        </button>
+                        <button
+                          onClick={() => {
+                            setSelectedReportId(report.id);
+                            setRejectFormData({ review_notes: '' });
+                            setShowRejectModal(true);
+                          }}
+                          className="flex items-center gap-2 rounded-lg bg-danger-500 px-4 py-2 text-sm font-semibold text-light hover:bg-danger-600 transition-colors focus:outline-none focus:ring-2 focus:ring-danger-500/30"
+                        >
+                          <XCircleIcon className="h-4 w-4" />
+                          رفض
+                        </button>
+                      </>
+                    )}
+                    {report.file_url && (
+                      <a
+                        href={report.file_url}
+                        download
+                        className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-light hover:bg-primary transition-colors focus:outline-none focus:ring-2 focus:ring-ring/30"
+                      >
+                        <DocumentArrowDownIcon className="h-4 w-4" />
+                        تحميل
+                      </a>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Report Details Modal */}
+      {showDetailsModal && currentReport && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-dark/50 p-4">
+          <div className="w-full max-w-2xl rounded-lg bg-surface border border-border p-6 max-h-[90vh] overflow-y-auto shadow-xl">
+            <h3 className="text-xl font-semibold text-text mb-5" style={{ fontFamily: 'inherit' }}>تفاصيل التقرير</h3>
+
+            <div className="space-y-5">
+              <div>
+                <label className="block text-sm font-semibold text-text mb-2">العنوان</label>
+                <p className="text-sm font-semibold text-text leading-relaxed">{currentReport.title || 'بدون عنوان'}</p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-semibold text-text mb-2">نوع التقرير</label>
+                  <p className="text-sm font-semibold text-text leading-relaxed">
+                    {reportTypeLabels[currentReport.report_type] || currentReport.report_type}
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-text mb-2">الحالة</label>
+                  <span
+                    className={`inline-block rounded-full px-3 py-1 text-xs font-medium ${
+                      statusColors[currentReport.status] || statusColors.draft
+                    }`}
+                  >
+                    {statusLabels[currentReport.status] || currentReport.status}
+                  </span>
+                </div>
+              </div>
+
+              {currentReport.description && (
+                <div>
+                  <label className="block text-sm font-semibold text-text mb-2">الوصف</label>
+                  <p className="text-sm text-text whitespace-pre-wrap leading-relaxed">{currentReport.description}</p>
+                </div>
+              )}
+
+              {/* Author, Student, Supervisor Info */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-border">
+                {currentReport.author_name && (
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2">المؤلف</label>
+                    <div className="flex items-center gap-2">
+                      <UserIcon className="h-4 w-4 text-primary flex-shrink-0" />
+                      <p className="text-sm text-text">{currentReport.author_name}</p>
+                    </div>
+                  </div>
+                )}
+                {currentReport.student_name && (
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2">الطالب</label>
+                    <div className="flex items-center gap-2">
+                      <UserIcon className="h-4 w-4 text-primary flex-shrink-0" />
+                      <p className="text-sm text-text">{currentReport.student_name}</p>
+                    </div>
+                  </div>
+                )}
+                {currentReport.supervisor_name && (
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2">المشرف</label>
+                    <div className="flex items-center gap-2">
+                      <UserIcon className="h-4 w-4 text-primary flex-shrink-0" />
+                      <p className="text-sm text-text">{currentReport.supervisor_name}</p>
+                    </div>
+                  </div>
+                )}
+                {currentReport.approved_by_name && (
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2">الموافق عليه بواسطة</label>
+                    <div className="flex items-center gap-2">
+                      <UserIcon className="h-4 w-4 text-success-500 flex-shrink-0" />
+                      <p className="text-sm text-text">{currentReport.approved_by_name}</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Content (Diagnosis, Sessions) */}
+              {currentReport.content && (
+                <div className="pt-4 border-t border-border">
+                  <label className="block text-sm font-semibold text-text mb-3">محتوى التقرير</label>
+                  <div className="space-y-3">
+                    {currentReport.content.diagnosis && (
+                      <div>
+                        <label className="block text-xs font-semibold text-text-secondary mb-1">التشخيص</label>
+                        <p className="text-sm text-text whitespace-pre-wrap leading-relaxed bg-primary-muted p-3 rounded-lg">
+                          {currentReport.content.diagnosis}
+                        </p>
+                      </div>
+                    )}
+                    {currentReport.content.sessions && Array.isArray(currentReport.content.sessions) && currentReport.content.sessions.length > 0 && (
+                      <div>
+                        <label className="block text-xs font-semibold text-text-secondary mb-1">الجلسات</label>
+                        <div className="space-y-2">
+                          {currentReport.content.sessions.map((session, index) => (
+                            <div key={index} className="bg-primary-muted p-3 rounded-lg">
+                              <p className="text-sm text-text">{JSON.stringify(session, null, 2)}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Score, Feedback, Review Notes */}
+              {(currentReport.score !== null && currentReport.score !== undefined) && (
+                <div className="pt-4 border-t border-border">
+                  <div className="flex items-center gap-2 mb-3">
+                    <StarIcon className="h-5 w-5 text-warning-500" />
+                    <label className="block text-sm font-semibold text-text">النتيجة</label>
+                  </div>
+                  <div className="bg-warning-50 p-3 rounded-lg">
+                    <p className="text-lg font-bold text-text">{currentReport.score}/100</p>
+                  </div>
+                </div>
+              )}
+
+              {currentReport.feedback && (
+                <div className="pt-4 border-t border-border">
+                  <label className="block text-sm font-semibold text-text mb-2">التعليقات</label>
+                  <p className="text-sm text-text whitespace-pre-wrap leading-relaxed bg-primary-muted p-3 rounded-lg">
+                    {currentReport.feedback}
+                  </p>
+                </div>
+              )}
+
+              {currentReport.review_notes && (
+                <div className="pt-4 border-t border-border">
+                  <label className="block text-sm font-semibold text-text mb-2">ملاحظات المراجعة</label>
+                  <p className="text-sm text-text whitespace-pre-wrap leading-relaxed bg-success-50 p-3 rounded-lg">
+                    {currentReport.review_notes}
+                  </p>
+                </div>
+              )}
+
+              {/* Attachments */}
+              {currentReport.attachments && Array.isArray(currentReport.attachments) && currentReport.attachments.length > 0 && (
+                <div className="pt-4 border-t border-border">
+                  <label className="block text-sm font-semibold text-text mb-3">المرفقات</label>
+                  <div className="space-y-2">
+                    {currentReport.attachments.map((attachment, index) => (
+                      <a
+                        key={index}
+                        href={attachment.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-3 p-3 bg-primary-muted hover:bg-tint-hover rounded-lg transition-colors"
+                      >
+                        <PhotoIcon className="h-5 w-5 text-link flex-shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-semibold text-text truncate">{attachment.type || `مرفق ${index + 1}`}</p>
+                          <p className="text-xs text-text-secondary truncate">{attachment.url}</p>
+                        </div>
+                        <LinkIcon className="h-4 w-4 text-link flex-shrink-0" />
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Dates */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-border">
+                {currentReport.created_at && (
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2">تاريخ الإنشاء</label>
+                    <div className="flex items-center gap-2">
+                      <CalendarIcon className="h-4 w-4 text-primary flex-shrink-0" />
+                      <p className="text-sm text-text">
+                        {new Date(currentReport.created_at).toLocaleDateString('ar-SA', {
+                          year: 'numeric',
+                          month: 'short',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </p>
+                    </div>
+                  </div>
+                )}
+                {currentReport.submitted_at && (
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2">تاريخ التقديم</label>
+                    <div className="flex items-center gap-2">
+                      <CalendarIcon className="h-4 w-4 text-info-500 flex-shrink-0" />
+                      <p className="text-sm text-text">
+                        {new Date(currentReport.submitted_at).toLocaleDateString('ar-SA', {
+                          year: 'numeric',
+                          month: 'short',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </p>
+                    </div>
+                  </div>
+                )}
+                {currentReport.approved_at && (
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2">تاريخ الموافقة</label>
+                    <div className="flex items-center gap-2">
+                      <CalendarIcon className="h-4 w-4 text-success-500 flex-shrink-0" />
+                      <p className="text-sm text-text">
+                        {new Date(currentReport.approved_at).toLocaleDateString('ar-SA', {
+                          year: 'numeric',
+                          month: 'short',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </p>
+                    </div>
+                  </div>
+                )}
+                {currentReport.locked_at && (
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2">تاريخ الإقفال</label>
+                    <div className="flex items-center gap-2">
+                      <ClockIcon className="h-4 w-4 text-primary flex-shrink-0" />
+                      <p className="text-sm text-text">
+                        {new Date(currentReport.locked_at).toLocaleDateString('ar-SA', {
+                          year: 'numeric',
+                          month: 'short',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {currentReport.file_url && (
+                <div>
+                  <label className="block text-sm font-semibold text-text mb-2">الملف</label>
+                  <a
+                    href={currentReport.file_url}
+                    download
+                    className="flex items-center gap-2 text-link hover:text-on-tint font-semibold transition-colors"
+                  >
+                    <DocumentArrowDownIcon className="h-5 w-5" />
+                    <span>تحميل التقرير</span>
+                  </a>
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              {(currentReport.status === 'draft' || currentReport.status === 'rejected') && (
+                <>
+                  <button
+                    onClick={() => handleEditReport(currentReport)}
+                    className="flex items-center gap-2 rounded-lg bg-orange-500 px-4 py-2.5 text-sm font-semibold text-light hover:bg-orange-600 transition-colors focus:outline-none focus:ring-2 focus:ring-orange-500/30"
+                  >
+                    <PencilIcon className="h-5 w-5" />
+                    تعديل
+                  </button>
+                  <button
+                    onClick={() => {
+                      handleSubmitReport(currentReport.id);
+                    }}
+                    className="flex items-center gap-2 rounded-lg bg-info-500 px-4 py-2.5 text-sm font-semibold text-light hover:bg-info-600 transition-colors focus:outline-none focus:ring-2 focus:ring-info-500/30"
+                  >
+                    <PaperAirplaneIcon className="h-5 w-5" />
+                    تقديم التقرير
+                  </button>
+                </>
+              )}
+              {currentReport.status === 'submitted' && (
+                <>
+                  <button
+                    onClick={() => {
+                      setSelectedReportId(currentReport.id);
+                      setApproveFormData({ review_notes: '', score: '' });
+                      setShowApproveModal(true);
+                    }}
+                    className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-success-500 px-4 py-2.5 text-sm font-semibold text-light hover:bg-success-600 transition-colors focus:outline-none focus:ring-2 focus:ring-success-500/30"
+                  >
+                    <CheckCircleIcon className="h-5 w-5" />
+                    موافقة
+                  </button>
+                  <button
+                    onClick={() => {
+                      setSelectedReportId(currentReport.id);
+                      setRejectFormData({ review_notes: '' });
+                      setShowRejectModal(true);
+                    }}
+                    className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-danger-500 px-4 py-2.5 text-sm font-semibold text-light hover:bg-danger-600 transition-colors focus:outline-none focus:ring-2 focus:ring-danger-500/30"
+                  >
+                    <XCircleIcon className="h-5 w-5" />
+                    رفض
+                  </button>
+                </>
+              )}
+              <button
+                onClick={() => {
+                  setShowDetailsModal(false);
+                  setSelectedReportId(null);
+                }}
+                className="flex-1 rounded-lg border-2 border-border-strong bg-surface px-4 py-2.5 text-sm font-semibold text-text hover:bg-primary-muted hover:border-border-hover transition-colors focus:outline-none focus:ring-2 focus:ring-ring/20"
+              >
+                إغلاق
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Approve Report Modal */}
+      {showApproveModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-dark/50 p-4">
+          <div className="w-full max-w-2xl rounded-lg bg-surface border border-border p-6 max-h-[90vh] overflow-y-auto shadow-xl">
+            <h3 className="text-xl font-semibold text-text mb-5" style={{ fontFamily: 'inherit' }}>
+              الموافقة على التقرير
+            </h3>
+
+            <div className="space-y-5">
+              <div>
+                <label className="block text-sm font-semibold text-text mb-2.5">
+                  ملاحظات المراجعة (اختياري)
+                </label>
+                <textarea
+                  value={approveFormData.review_notes}
+                  onChange={(e) => setApproveFormData({ ...approveFormData, review_notes: e.target.value })}
+                  rows={4}
+                  placeholder="أدخل ملاحظات المراجعة..."
+                  className="w-full rounded-lg border-2 border-success-200 bg-success-50 px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-success-400 focus:bg-surface focus:outline-none focus:ring-2 focus:ring-success-400/20 transition-all duration-200 resize-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-text mb-2.5">
+                  النقاط (اختياري)
+                </label>
+                <input
+                  type="number"
+                  value={approveFormData.score}
+                  onChange={(e) => setApproveFormData({ ...approveFormData, score: e.target.value })}
+                  min="0"
+                  max="100"
+                  step="0.1"
+                  placeholder="أدخل النقاط (0-100)"
+                  className="w-full rounded-lg border-2 border-success-200 bg-success-50 px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-success-400 focus:bg-surface focus:outline-none focus:ring-2 focus:ring-success-400/20 transition-all duration-200"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={handleApproveReport}
+                className="flex-1 rounded-lg bg-success-500 px-4 py-2.5 text-sm font-semibold text-light hover:bg-success-600 transition-colors focus:outline-none focus:ring-2 focus:ring-success-500/30"
+              >
+                موافقة
+              </button>
+              <button
+                onClick={() => {
+                  setShowApproveModal(false);
+                  setSelectedReportId(null);
+                  setApproveFormData({ review_notes: '', score: '' });
+                }}
+                className="flex-1 rounded-lg border-2 border-success-200 bg-surface px-4 py-2.5 text-sm font-semibold text-text hover:bg-success-50 hover:border-success-300 transition-colors focus:outline-none focus:ring-2 focus:ring-success-400/20"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reject Report Modal */}
+      {showRejectModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-dark/50 p-4">
+          <div className="w-full max-w-2xl rounded-lg bg-surface border border-border p-6 max-h-[90vh] overflow-y-auto shadow-xl">
+            <h3 className="text-xl font-semibold text-text mb-5" style={{ fontFamily: 'inherit' }}>
+              رفض التقرير
+            </h3>
+
+            <div className="space-y-5">
+              <div className="rounded-lg bg-danger-50 border-2 border-danger-200 p-4">
+                <p className="text-sm font-semibold text-danger-800 mb-2">تنبيه</p>
+                <p className="text-sm text-danger-700">
+                  يجب إدخال ملاحظات المراجعة عند رفض التقرير لتوضيح سبب الرفض.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-text mb-2.5">
+                  ملاحظات المراجعة <span className="text-danger-600">*</span>
+                </label>
+                <textarea
+                  value={rejectFormData.review_notes}
+                  onChange={(e) => setRejectFormData({ ...rejectFormData, review_notes: e.target.value })}
+                  rows={6}
+                  placeholder="أدخل ملاحظات المراجعة (مطلوب)..."
+                  required
+                  className="w-full rounded-lg border-2 border-danger-200 bg-danger-50 px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-danger-400 focus:bg-surface focus:outline-none focus:ring-2 focus:ring-danger-400/20 transition-all duration-200 resize-none"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={handleRejectReport}
+                className="flex-1 rounded-lg bg-danger-500 px-4 py-2.5 text-sm font-semibold text-light hover:bg-danger-600 transition-colors focus:outline-none focus:ring-2 focus:ring-danger-500/30"
+              >
+                رفض
+              </button>
+              <button
+                onClick={() => {
+                  setShowRejectModal(false);
+                  setSelectedReportId(null);
+                  setRejectFormData({ review_notes: '' });
+                }}
+                className="flex-1 rounded-lg border-2 border-danger-200 bg-surface px-4 py-2.5 text-sm font-semibold text-text hover:bg-danger-50 hover:border-danger-300 transition-colors focus:outline-none focus:ring-2 focus:ring-danger-400/20"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Create Report Modal */}
+      {showCreateModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-dark/50 p-4">
+          <div className="w-full max-w-3xl rounded-lg bg-surface border border-border p-6 max-h-[90vh] overflow-y-auto shadow-xl">
+            <h3 className="text-xl font-semibold text-text mb-5" style={{ fontFamily: 'inherit' }}>
+              إنشاء تقرير جديد
+            </h3>
+
+            <div className="space-y-5">
+              <div>
+                <label className="block text-sm font-semibold text-text mb-2.5">
+                  نوع التقرير <span className="text-link">*</span>
+                </label>
+                <select
+                  value={createFormData.report_type}
+                  onChange={(e) => setCreateFormData({ ...createFormData, report_type: e.target.value })}
+                  required
+                  className="w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm text-text focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200"
+                >
+                  <option value="clinical_case">تقرير حالة سريرية</option>
+                  <option value="cases">تقرير الحالات</option>
+                  <option value="sessions">تقرير الجلسات</option>
+                  <option value="appointments">تقرير المواعيد</option>
+                  <option value="evaluations">تقرير التقييمات</option>
+                  <option value="summary">تقرير شامل</option>
+                  <option value="custom">تقرير مخصص</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-text mb-2.5">
+                  نوع الهدف <span className="text-link">*</span>
+                </label>
+                <select
+                  value={createFormData.target_type}
+                  onChange={(e) => setCreateFormData({ ...createFormData, target_type: e.target.value, target_id: '' })}
+                  required
+                  className="w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm text-text focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200"
+                >
+                  <option value="case">حالة سريرية</option>
+                  <option value="session">جلسة</option>
+                  <option value="appointment">موعد</option>
+                </select>
+              </div>
+
+              {createFormData.target_type === 'case' && (
+                <div>
+                  <label className="block text-sm font-semibold text-text mb-2.5">
+                    الحالة السريرية <span className="text-link">*</span>
+                  </label>
+                  <select
+                    value={createFormData.target_id}
+                    onChange={(e) => setCreateFormData({ ...createFormData, target_id: e.target.value })}
+                    required
+                    className="w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm text-text focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200"
+                  >
+                    <option value="">اختر الحالة</option>
+                    {Array.isArray(cases) && cases.map((caseItem) => (
+                      <option key={caseItem.id} value={caseItem.id}>
+                        {caseItem.title || `حالة ${caseItem.id.substring(0, 8)}...`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {(createFormData.target_type === 'session' || createFormData.target_type === 'appointment') && (
+                <div>
+                  <label className="block text-sm font-semibold text-text mb-2.5">
+                    معرف {createFormData.target_type === 'session' ? 'الجلسة' : 'الموعد'} <span className="text-link">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={createFormData.target_id}
+                    onChange={(e) => setCreateFormData({ ...createFormData, target_id: e.target.value })}
+                    required
+                    placeholder={`أدخل معرف ${createFormData.target_type === 'session' ? 'الجلسة' : 'الموعد'} (UUID)`}
+                    className="w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-semibold text-text mb-2.5">
+                  العنوان <span className="text-link">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={createFormData.title}
+                  onChange={(e) => setCreateFormData({ ...createFormData, title: e.target.value })}
+                  required
+                  placeholder="أدخل عنوان التقرير"
+                  className="w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-text mb-2.5">
+                  الوصف <span className="text-text-secondary text-xs">(اختياري)</span>
+                </label>
+                <textarea
+                  value={createFormData.description}
+                  onChange={(e) => setCreateFormData({ ...createFormData, description: e.target.value })}
+                  rows={3}
+                  placeholder="ملخص قصير للتقرير..."
+                  className="w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200 resize-none"
+                />
+              </div>
+
+              {createFormData.report_type === 'clinical_case' && (
+                <>
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2.5">
+                      التشخيص <span className="text-text-secondary text-xs">(اختياري)</span>
+                    </label>
+                    <textarea
+                      value={createFormData.diagnosis}
+                      onChange={(e) => setCreateFormData({ ...createFormData, diagnosis: e.target.value })}
+                      rows={4}
+                      placeholder="أدخل التشخيص..."
+                      className="w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200 resize-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2.5">
+                      الملخص <span className="text-text-secondary text-xs">(اختياري)</span>
+                    </label>
+                    <textarea
+                      value={createFormData.summary}
+                      onChange={(e) => setCreateFormData({ ...createFormData, summary: e.target.value })}
+                      rows={4}
+                      placeholder="أدخل ملخص التقرير..."
+                      className="w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200 resize-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2.5">
+                      خطة العلاج <span className="text-text-secondary text-xs">(اختياري)</span>
+                    </label>
+                    <textarea
+                      value={createFormData.treatment_plan}
+                      onChange={(e) => setCreateFormData({ ...createFormData, treatment_plan: e.target.value })}
+                      rows={4}
+                      placeholder="أدخل خطة العلاج..."
+                      className="w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200 resize-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2.5">
+                      ملاحظات <span className="text-text-secondary text-xs">(اختياري)</span>
+                    </label>
+                    <textarea
+                      value={createFormData.notes}
+                      onChange={(e) => setCreateFormData({ ...createFormData, notes: e.target.value })}
+                      rows={3}
+                      placeholder="أدخل ملاحظات إضافية..."
+                      className="w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200 resize-none"
+                    />
+                  </div>
+                </>
+              )}
+
+              {createFormData.report_type !== 'clinical_case' && (
+                <div>
+                  <label className="block text-sm font-semibold text-text mb-2.5">
+                    المحتوى <span className="text-text-secondary text-xs">(اختياري)</span>
+                  </label>
+                  <textarea
+                    value={createFormData.summary}
+                    onChange={(e) => setCreateFormData({ ...createFormData, summary: e.target.value })}
+                    rows={6}
+                    placeholder="أدخل محتوى التقرير..."
+                    className="w-full rounded-lg border-2 border-border-strong bg-primary-muted px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-ring focus:bg-surface focus:outline-none focus:ring-2 focus:ring-ring/20 transition-all duration-200 resize-none"
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={handleCreateReport}
+                className="flex-1 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-light hover:bg-primary-hover transition-colors focus:outline-none focus:ring-2 focus:ring-primary/30"
+              >
+                إنشاء
+              </button>
+              <button
+                onClick={() => {
+                  setShowCreateModal(false);
+                  setCreateFormData({
+                    report_type: 'clinical_case',
+                    target_type: 'case',
+                    target_id: '',
+                    title: '',
+                    description: '',
+                    diagnosis: '',
+                    summary: '',
+                    treatment_plan: '',
+                    notes: '',
+                  });
+                }}
+                className="flex-1 rounded-lg border-2 border-border-strong bg-surface px-4 py-2.5 text-sm font-semibold text-text hover:bg-primary-muted hover:border-border-hover transition-colors focus:outline-none focus:ring-2 focus:ring-ring/20"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Report Modal */}
+      {showEditModal && selectedReport && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-dark/50 p-4">
+          <div className="w-full max-w-3xl rounded-lg bg-surface border border-border p-6 max-h-[90vh] overflow-y-auto shadow-xl">
+            <h3 className="text-xl font-semibold text-text mb-5" style={{ fontFamily: 'inherit' }}>
+              تعديل التقرير
+            </h3>
+
+            <div className="space-y-5">
+              <div className="rounded-lg bg-orange-50 border-2 border-orange-200 p-4">
+                <p className="text-sm font-semibold text-orange-800 mb-2">معلومات التقرير</p>
+                <div className="text-sm text-orange-700 space-y-1">
+                  <p>النوع: {reportTypeLabels[selectedReport.report_type] || selectedReport.report_type}</p>
+                  <p>الحالة: {statusLabels[selectedReport.status] || selectedReport.status}</p>
+                  <p>نوع الهدف: {selectedReport.target_type}</p>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-text mb-2.5">
+                  العنوان <span className="text-orange-600">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={editFormData.title}
+                  onChange={(e) => setEditFormData({ ...editFormData, title: e.target.value })}
+                  required
+                  placeholder="أدخل عنوان التقرير"
+                  className="w-full rounded-lg border-2 border-orange-200 bg-orange-50 px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-orange-400 focus:bg-surface focus:outline-none focus:ring-2 focus:ring-orange-400/20 transition-all duration-200"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-text mb-2.5">
+                  الوصف <span className="text-text-secondary text-xs">(اختياري)</span>
+                </label>
+                <textarea
+                  value={editFormData.description}
+                  onChange={(e) => setEditFormData({ ...editFormData, description: e.target.value })}
+                  rows={3}
+                  placeholder="ملخص قصير للتقرير..."
+                  className="w-full rounded-lg border-2 border-orange-200 bg-orange-50 px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-orange-400 focus:bg-surface focus:outline-none focus:ring-2 focus:ring-orange-400/20 transition-all duration-200 resize-none"
+                />
+              </div>
+
+              {selectedReport?.report_type === 'clinical_case' && (
+                <>
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2.5">
+                      التشخيص <span className="text-text-secondary text-xs">(اختياري)</span>
+                    </label>
+                    <textarea
+                      value={editFormData.diagnosis}
+                      onChange={(e) => setEditFormData({ ...editFormData, diagnosis: e.target.value })}
+                      rows={4}
+                      placeholder="أدخل التشخيص..."
+                      className="w-full rounded-lg border-2 border-orange-200 bg-orange-50 px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-orange-400 focus:bg-surface focus:outline-none focus:ring-2 focus:ring-orange-400/20 transition-all duration-200 resize-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2.5">
+                      الملخص <span className="text-text-secondary text-xs">(اختياري)</span>
+                    </label>
+                    <textarea
+                      value={editFormData.summary}
+                      onChange={(e) => setEditFormData({ ...editFormData, summary: e.target.value })}
+                      rows={4}
+                      placeholder="أدخل ملخص التقرير..."
+                      className="w-full rounded-lg border-2 border-orange-200 bg-orange-50 px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-orange-400 focus:bg-surface focus:outline-none focus:ring-2 focus:ring-orange-400/20 transition-all duration-200 resize-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2.5">
+                      خطة العلاج <span className="text-text-secondary text-xs">(اختياري)</span>
+                    </label>
+                    <textarea
+                      value={editFormData.treatment_plan}
+                      onChange={(e) => setEditFormData({ ...editFormData, treatment_plan: e.target.value })}
+                      rows={4}
+                      placeholder="أدخل خطة العلاج..."
+                      className="w-full rounded-lg border-2 border-orange-200 bg-orange-50 px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-orange-400 focus:bg-surface focus:outline-none focus:ring-2 focus:ring-orange-400/20 transition-all duration-200 resize-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-text mb-2.5">
+                      ملاحظات <span className="text-text-secondary text-xs">(اختياري)</span>
+                    </label>
+                    <textarea
+                      value={editFormData.notes}
+                      onChange={(e) => setEditFormData({ ...editFormData, notes: e.target.value })}
+                      rows={3}
+                      placeholder="أدخل ملاحظات إضافية..."
+                      className="w-full rounded-lg border-2 border-orange-200 bg-orange-50 px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-orange-400 focus:bg-surface focus:outline-none focus:ring-2 focus:ring-orange-400/20 transition-all duration-200 resize-none"
+                    />
+                  </div>
+                </>
+              )}
+
+              {selectedReport?.report_type !== 'clinical_case' && (
+                <div>
+                  <label className="block text-sm font-semibold text-text mb-2.5">
+                    المحتوى <span className="text-text-secondary text-xs">(اختياري)</span>
+                  </label>
+                  <textarea
+                    value={editFormData.summary}
+                    onChange={(e) => setEditFormData({ ...editFormData, summary: e.target.value })}
+                    rows={6}
+                    placeholder="أدخل محتوى التقرير..."
+                    className="w-full rounded-lg border-2 border-orange-200 bg-orange-50 px-4 py-2.5 text-sm text-text placeholder-text-secondary/60 focus:border-orange-400 focus:bg-surface focus:outline-none focus:ring-2 focus:ring-orange-400/20 transition-all duration-200 resize-none"
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={handleUpdateReport}
+                className="flex-1 rounded-lg bg-orange-500 px-4 py-2.5 text-sm font-semibold text-light hover:bg-orange-600 transition-colors focus:outline-none focus:ring-2 focus:ring-orange-500/30"
+              >
+                حفظ التغييرات
+              </button>
+              <button
+                onClick={() => {
+                  setShowEditModal(false);
+                  setSelectedReport(null);
+                  setSelectedReportId(null);
+                  setEditFormData({
+          title: '',
+          description: '',
+          diagnosis: '',
+          summary: '',
+          treatment_plan: '',
+          notes: '',
+        });
+                }}
+                className="flex-1 rounded-lg border-2 border-orange-200 bg-surface px-4 py-2.5 text-sm font-semibold text-text hover:bg-orange-50 hover:border-orange-300 transition-colors focus:outline-none focus:ring-2 focus:ring-orange-400/20"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
+
+
+
+
+
+
